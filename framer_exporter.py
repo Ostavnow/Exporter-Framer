@@ -135,7 +135,9 @@ class FramerSiteExporter:
                 filename = Path(path).name or 'index.html'
                 if not filename.endswith('.html'):
                     filename += '.html'
-                subpath = Path(path).parent.lstrip('/')
+                subpath = str(Path(path).parent).lstrip('/')
+                if subpath == '.' or subpath == '':
+                    return base_dir / filename
                 return base_dir / subpath / filename
             else:
                 return base_dir / 'index.html'
@@ -494,7 +496,23 @@ class FramerSiteExporter:
                     url, rtype = futures[future]
                     try:
                         if future.result():
-                            self.stats[f'{rtype}s' if not rtype.endswith('s') else rtype + 's'] += 1
+                            # Корректное обновление статистики
+                            if rtype == 'css':
+                                self.stats['css_files'] += 1
+                            elif rtype == 'javascript':
+                                self.stats['js_files'] += 1
+                            elif rtype == 'image':
+                                self.stats['images'] += 1
+                            elif rtype == 'video':
+                                self.stats['videos'] += 1
+                            elif rtype == 'audio':
+                                self.stats['audio'] += 1
+                            elif rtype == 'font':
+                                self.stats['fonts'] += 1
+                            elif rtype == 'document':
+                                self.stats['documents'] += 1
+                            else:
+                                self.stats['other'] += 1
                     except Exception as e:
                         logger.error(f"Ошибка при загрузке {url}: {e}")
             
@@ -544,7 +562,7 @@ class FramerSiteExporter:
         print("="*50)
         print(f"HTML страниц: {self.stats['html_pages']}")
         print(f"CSS файлов: {self.stats['css_files']}")
-        print(f"JavaScript файлов: {self.stats['javascript_files']}")
+        print(f"JavaScript файлов: {self.stats['js_files']}")
         print(f"Изображений: {self.stats['images']}")
         print(f"Видео: {self.stats['videos']}")
         print(f"Аудио: {self.stats['audio']}")
