@@ -2,6 +2,7 @@
 """
 Framer Site Exporter - Полное копирование ресурсов сайта Framer
 Копирует HTML, CSS, JavaScript, медиафайлы и все ассеты
+Версия 2.0 с улучшенной обработкой CSS, шрифтов и путей
 """
 
 import os
@@ -89,21 +90,52 @@ class FramerSiteExporter:
             'errors': 0
         }
         
-    def get_resource_type(self, url: str) -> str:
-        """Определение типа ресурса по URL"""
+    def get_resource_type(self, url: str, content_type: str = None) -> str:
+        """Определение типа ресурса по URL и Content-Type"""
         parsed = urlparse(url)
         path = parsed.path.lower()
-        ext = Path(path).suffix.lower()
+        # Извлекаем расширение до query параметров
+        path_without_query = path.split('?')[0]
+        ext = Path(path_without_query).suffix.lower()
         
-        for resource_type, extensions in self.MEDIA_EXTENSIONS.items():
-            if ext in extensions:
-                return resource_type
+        # Сначала проверяем Content-Type если есть
+        if content_type:
+            content_type_lower = content_type.lower()
+            if 'text/css' in content_type_lower:
+                return 'css'
+            elif 'javascript' in content_type_lower or 'application/x-javascript' in content_type_lower:
+                return 'javascript'
+            elif 'image/' in content_type_lower:
+                return 'image'
+            elif 'video/' in content_type_lower:
+                return 'video'
+            elif 'audio/' in content_type_lower:
+                return 'audio'
+            elif 'font/' in content_type_lower or 'application/font-' in content_type_lower or 'application/x-font-' in content_type_lower:
+                return 'font'
+            elif 'application/pdf' in content_type_lower:
+                return 'document'
+            elif 'text/html' in content_type_lower:
+                return 'html'
         
+        # Проверяем путь для script файлов Framer
+        if '/script' in path or path.endswith('.mjs') or path.endswith('.js'):
+            return 'javascript'
+        
+        # Затем проверяем расширение файла
         if ext == '.css':
             return 'css'
-        elif ext == '.js':
-            return 'javascript'
-        elif ext in {'.html', '.htm'} or path.endswith('/'):
+        elif ext in {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp', '.avif'}:
+            return 'image'
+        elif ext in {'.mp4', '.webm', '.ogg', '.mov', '.avi'}:
+            return 'video'
+        elif ext in {'.mp3', '.wav', '.ogg', '.aac'}:
+            return 'audio'
+        elif ext in {'.woff', '.woff2', '.ttf', '.eot', '.otf'}:
+            return 'font'
+        elif ext == '.pdf':
+            return 'document'
+        elif ext in {'.html', '.htm'} or path.endswith('/') or not ext:
             return 'html'
         
         return 'other'
@@ -182,13 +214,14 @@ class FramerSiteExporter:
         
         return base_dir / filename
     
-    def download_file(self, url: str, save_path: Path) -> bool:
+    def download_file(self, url: str, save_path: Path, content_type: str = None) -> bool:
         """
         Загрузка файла по URL
         
         Args:
             url: URL для загрузки
             save_path: Путь для сохранения
+            content_type: Content-Type из заголовков ответа
             
         Returns:
             True если загрузка успешна, False иначе
@@ -205,18 +238,70 @@ class FramerSiteExporter:
             response = self.session.get(url, stream=True, timeout=30)
             response.raise_for_status()
             
+            # Если content_type не передан, получаем его из ответа
+            if not content_type:
+                content_type = response.headers.get('Content-Type', '')
+            
+            # Пересоздаём путь с учётом правильного типа ресурса
+            resource_type = self.get_resource_type(url, content_type)
+            correct_path = self.get_local_path(url, resource_type)
+            
+            # Если путь изменился, используем новый
+            if str(correct_path) != str(save_path):
+                save_path = correct_path
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+            
             # Записываем файл
             with open(save_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
             logger.info(f"Загружено: {url} -> {save_path}")
+            
+            # Если это CSS файл, извлекаем из него ресурсы
+            if resource_type == 'css':
+                self.extract_resources_from_css(response.text, url)
+            
             return True
             
         except Exception as e:
             logger.error(f"Ошибка загрузки {url}: {e}")
             self.stats['errors'] += 1
             return False
+    
+    def extract_resources_from_css(self, css_content: str, base_url: str):
+        """Извлечение шрифтов и изображений из CSS"""
+        # Извлекаем шрифты из @font-face
+        font_urls = re.findall(r'@font-face[^}]*url\(["\']?([^"\'\)]+)["\']?\)', css_content, re.DOTALL)
+        for url in font_urls:
+            if not url.startswith('data:') and url not in self.visited_urls:
+                full_url = urljoin(base_url, url)
+                resource_type = self.get_resource_type(full_url)
+                local_path = self.get_local_path(full_url, resource_type)
+                self.url_to_path[full_url] = local_path
+                
+                # Загружаем шрифт
+                try:
+                    self.download_file(full_url, local_path)
+                    self.stats['fonts'] += 1
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки шрифта {full_url}: {e}")
+        
+        # Извлекаем background-image url()
+        bg_urls = re.findall(r'background(?:-image)?\s*:[^;]*url\(["\']?([^"\'\)]+)["\']?\)', css_content)
+        for url in bg_urls:
+            if not url.startswith('data:') and url not in self.visited_urls:
+                full_url = urljoin(base_url, url)
+                resource_type = self.get_resource_type(full_url)
+                local_path = self.get_local_path(full_url, resource_type)
+                self.url_to_path[full_url] = local_path
+                
+                # Загружаем изображение
+                try:
+                    self.download_file(full_url, local_path)
+                    self.stats['images'] += 1
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки фона {full_url}: {e}")
     
     def extract_resources_from_html(self, html_content: str, base_url: str) -> Dict[str, List[str]]:
         """
@@ -307,6 +392,15 @@ class FramerSiteExporter:
                 urls = re.findall(r'@import\s+["\']([^"\']+)["\']', style.string)
                 for url in urls:
                     resources['css'].append(urljoin(base_url, url))
+        
+        # Извлекаем шрифты из CSS (@font-face) во inline style
+        for style in soup.find_all('style'):
+            if style.string:
+                # Ищем url() внутри @font-face
+                font_urls = re.findall(r'@font-face[^}]*url\(["\']?([^"\'\)]+)["\']?\)', style.string, re.DOTALL)
+                for url in font_urls:
+                    if not url.startswith('data:'):
+                        resources['fonts'].append(urljoin(base_url, url))
         
         # Ссылки на другие страницы
         for link in soup.find_all('a', href=True):
@@ -406,8 +500,8 @@ class FramerSiteExporter:
     
     def get_relative_path(self, target_path: Path) -> str:
         """Получение относительного пути от текущего файла"""
-        # Для простоты возвращаем абсолютный путь от корня export
-        return target_path.relative_to(self.output_dir)
+        # Возвращаем строковый относительный путь от корня export
+        return str(target_path.relative_to(self.output_dir)).replace('\\', '/')
     
     def process_page(self, url: str) -> bool:
         """
@@ -485,6 +579,14 @@ class FramerSiteExporter:
                     self.url_to_path[audio_url] = local_path
                     tasks.append((audio_url, local_path, 'audio'))
             
+            # Шрифты
+            for font_url in resources['fonts']:
+                if font_url not in self.visited_urls and not font_url.startswith('data:'):
+                    resource_type = self.get_resource_type(font_url)
+                    local_path = self.get_local_path(font_url, resource_type)
+                    self.url_to_path[font_url] = local_path
+                    tasks.append((font_url, local_path, 'font'))
+            
             # Выполняем загрузку в потоках
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = {
@@ -495,8 +597,9 @@ class FramerSiteExporter:
                 for future in as_completed(futures):
                     url, rtype = futures[future]
                     try:
-                        if future.result():
-                            # Корректное обновление статистики
+                        result = future.result()
+                        if result:
+                            # Обновляем статистику по типу ресурса
                             if rtype == 'css':
                                 self.stats['css_files'] += 1
                             elif rtype == 'javascript':
